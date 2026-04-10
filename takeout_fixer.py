@@ -216,20 +216,28 @@ class TakeoutMaster:
         if not self.exiftool_available or not self.exiftool_path:
             return False
             
-        cmd = [self.exiftool_path, '-overwrite_original']
+        cmd = [self.exiftool_path, '-overwrite_original', '-all']
         try:
             dt_s = datetime.fromtimestamp(int(timestamp)).strftime('%Y:%m:%d %H:%M:%S')
-            cmd.append(f'-DateTimeOriginal={dt_s}')
-            cmd.append(f'-CreateDate={dt_s}')
-            cmd.append(f'-ModifyDate={dt_s}')
-            cmd.append(f'-FileModifyDate={dt_s}')
+            
+            # Set all relevant date/time metadata tags (Windows Explorer compatibility)
+            cmd.extend([
+                f'-DateTimeOriginal={dt_s}',      # When photo was originally taken (most important)
+                f'-CreateDate={dt_s}',           # File creation time (Windows "Date Created")
+                f'-ModifyDate={dt_s}',           # File modification time (Windows "Date Modified")
+                f'-FileModifyDate={dt_s}',       # Windows file system modify time
+                f'-MediaCreateDate={dt_s}',      # Common video/photo creation tag
+                f'-MediaModifyDate={dt_s}',      # Common video/photo modify tag
+            ])
             
             if lat is not None and lon is not None:
                 if abs(lat) > 0.01 or abs(lon) > 0.01:
-                    cmd.append(f'-GPSLatitude={abs(lat)}')
-                    cmd.append(f'-GPSLongitude={abs(lon)}')
-                    cmd.append('-GPSLatitudeRef=N' if lat >= 0 else '-GPSLatitudeRef=S')
-                    cmd.append('-GPSLongitudeRef=E' if lon >= 0 else '-GPSLongitudeRef=W')
+                    cmd.extend([
+                        f'-GPSLatitude={abs(lat)}',
+                        f'-GPSLongitude={abs(lon)}',
+                        '-GPSLatitudeRef=N' if lat >= 0 else '-GPSLatitudeRef=S',
+                        '-GPSLongitudeRef=E' if lon >= 0 else '-GPSLongitudeRef=W',
+                    ])
                 else:
                     self.stats["missing_gps"] += 1
             
