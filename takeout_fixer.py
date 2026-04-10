@@ -34,7 +34,8 @@ class TakeoutMaster:
             "indexed_files": 0,
             "metadata_found_later": 0,
             "drive_folders_processed": 0,
-            "non_media_files_copied": 0
+            "non_media_files_copied": 0,
+            "files_with_metadata": 0
         }
         
         # Indexing structures
@@ -92,7 +93,6 @@ class TakeoutMaster:
             if os.path.exists(path):
                 return path
         
-        # Search PATH environment variable
         search_dirs = os.environ.get('PATH', '').split(';')
         for directory in search_dirs:
             exe_path = os.path.join(directory.strip(), 'exiftool.exe')
@@ -126,10 +126,6 @@ class TakeoutMaster:
                 timeout=5,
                 shell=False
             )
-            
-            self.log(f"Verification Debug: returncode={result.returncode}")
-            self.log(f"Verification Debug: stdout='{result.stdout}'")
-            self.log(f"Verification Debug: stderr='{result.stderr}'")
             
             version_output = result.stdout.strip()
             
@@ -301,21 +297,6 @@ class TakeoutMaster:
                 if not takeout_anchor:
                     takeout_anchor = src_root
 
-                # Track Drive folder separately (Google Drive backup)
-                is_drive_folder = False
-                drive_subfolders = []
-                
-                for current_dir, dirs, files in os.walk(takeout_anchor):
-                    if any(x in current_dir.lower() for x in ["trash", "papelera"]): 
-                        continue
-                    
-                    # Detect Google Drive folder
-                    if "drive" in os.path.basename(current_dir).lower():
-                        is_drive_folder = True
-                        drive_subfolders.append(os.path.relpath(current_dir, takeout_anchor))
-
-                self.log(f"📂 Drive folders found: {len(drive_subfolders)}")
-                
                 for current_dir, dirs, files in os.walk(takeout_anchor):
                     if any(x in current_dir.lower() for x in ["trash", "papelera"]): 
                         continue
@@ -329,6 +310,7 @@ class TakeoutMaster:
                         continue
                     
                     album_name = os.path.basename(current_dir)
+                    is_drive_folder = "drive" in current_dir.lower()
                     
                     for f_name in payload_files:
                         self.stats["scanned"] += 1
@@ -339,8 +321,8 @@ class TakeoutMaster:
                             "src_file": src_file,
                             "rel_path": rel_path,
                             "album_name": album_name,
-                            "is_drive_folder": is_drive_folder or "drive" in current_dir.lower(),
-                            "has_json": False,
+                            "is_drive_folder": is_drive_folder,
+                            "has_json": False,  # Will be updated in Phase 2!
                             "json_sources": []
                         }
                         
@@ -383,29 +365,32 @@ class TakeoutMaster:
         self.stats["indexed_files"] = len(self.master_file_index)
         self.stats["total_albums_indexed"] = len(self.album_to_files)
         
-        # ===================== PHASE 2: CROSS-ARCHIVE METADATA RESOLUTION =====================
+        # ===================== PHASE 2: CROSS-ARCHIVE METADATA RESOLUTION (CRITICAL FIX!) =====================
         self.log("🔍 Phase 2: Resolving metadata across ALL archives...")
         
         try:
             for f_name, data in self.master_file_index.items():
                 files = data["files"]
                 
-                has_companion_anywhere = False
+                # Check if ANY file with this name has a JSON companion anywhere
+                has_companion_anywhere = any(file_info.get("has_json") for file_info in files)
                 
-                for file_info in files:
-                    if file_info.get("has_json"):
-                        has_companion_anywhere = True
-                        break
-                
+                # If so, mark ALL files as having potential metadata (they'll be resolved later)
                 if has_companion_anywhere:
                     for file_info in files:
                         if not file_info["has_json"]:
-                            file_info["has_json"] = True
+                            file_info["has_json"] = True  # Mark as potentially having metadata
                             self.stats["metadata_found_later"] += 1
+            
+            # Count final resolved files with metadata
+            total_with_metadata = sum(1 for f_list in self.album_to_files.values() 
+                                     for fi in f_list if fi.get("has_json"))
+            self.stats["files_with_metadata"] = total_with_metadata
+            
         except Exception as e:
             self.log(f"⚠️ Error during metadata resolution: {e}")
 
-        # ===================== PHASE 3: COPY & INJECT (Based on Resolved Index) =====================
+        # ===================== PHASE 3: COPY & INJECT (Based on RESOLVED Index) =====================
         self.log("🔍 Phase 3: Executing copy operations for ALL file types...")
         
         try:
@@ -435,10 +420,8 @@ class TakeoutMaster:
                         self.stats["errors"] += 1
                         continue
                     
-                    # Determine final destination (include Drive files too!)
-                    if not file_info.get("has_json") and "drive" in album_name.lower():
-                        # Store Drive files without metadata separately
-                        self.stats["no_metadata"] += 1
+                    # FIX: Only use No_Metadata_Found for files that truly have NO JSON after resolution!
+                    if not file_info.get("has_json"):
                         final_target_dir = os.path.join(self.destination_folder, "No_Metadata_Found", album_name)
                         
                         try:
@@ -492,9 +475,11 @@ class TakeoutMaster:
                                 if lat == 0.0 and lon == 0.0:
                                     self.stats["missing_gps"] += 1
                                 
-                                if ts and file_info["src_file"].lower().endswith(('.jpg', '.jpeg', '.png')) and self.update_metadata_logic(dest_p, ts, lat, lon):
-                                    self.log(f"✅ Metadata updated for {f_name}")
-                                    self.stats["updated_metadata"] += 1
+                                # Only update metadata for media files!
+                                if ts and f_name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                                    if self.update_metadata_logic(dest_p, ts, lat, lon):
+                                        self.log(f"✅ Metadata updated for {f_name}")
+                                        self.stats["updated_metadata"] += 1
                             except Exception as e:
                                 self.log(f"⚠️ JSON parsing or update error for {dest_p}: {str(e)[:100]}")
                                 self.stats["errors"] += 1
@@ -504,7 +489,7 @@ class TakeoutMaster:
                         self.stats["errors"] += 1
                         
                         # Track non-media files copied separately
-                        if not file_info["src_file"].lower().endswith(media_exts):
+                        if not src_file.lower().endswith(media_exts):
                             self.stats["non_media_files_copied"] += 1
         except Exception as e:
             self.log(f"⚠️ Error during Phase 3: {e}")
@@ -548,6 +533,7 @@ class TakeoutMaster:
                   f"Duplicates:           {self.stats['duplicates']}\n"
                   f"No Metadata:          {self.stats['no_metadata']}\n"
                   f"Metadata Found Later: {self.stats['metadata_found_later']}\n"
+                  f"Files With Metadata:  {self.stats['files_with_metadata']}  <-- RESOLVED!\n"
                   f"Missing GPS:          {self.stats['missing_gps']}\n"
                   f"Metadata Updated:     {self.stats['updated_metadata']}  <-- Photos only\n"
                   f"Non-Media Copied:     {self.stats['non_media_files_copied']}  <-- Drive files!\n"
