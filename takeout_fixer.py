@@ -32,7 +32,7 @@ class TakeoutMaster:
         self.start_time = None
         self.end_time = None
         
-        # Statistics tracking
+        # Statistics tracking (as a dictionary)
         self.stats = {
             "scanned": 0, 
             "copied": 0, 
@@ -390,12 +390,12 @@ class TakeoutMaster:
                     for f_name in payload_files:
                         self.stats["scanned"] += 1
                         
-                        # Track file size during scan
+                        # Track file size during scan (in main thread context via queue)
                         src_file = os.path.join(current_dir, f_name)
                         try:
                             file_size = os.path.getsize(src_file)
-                            self.root.after(0, lambda s=self.stats["total_bytes_scanned"], f=file_size: 
-                                setattr(self.stats, "total_bytes_scanned", s + f))
+                            # Update stats safely using dictionary access
+                            self.stats["total_bytes_scanned"] += file_size
                         except Exception as e:
                             pass
                         
@@ -440,7 +440,7 @@ class TakeoutMaster:
             except Exception as e:
                 self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Error scanning {src_root}: {err}"))
 
-        # Report scan stats
+        # Report scan stats (after Phase 1 completes)
         scanned_size = self.format_bytes(self.stats["total_bytes_scanned"])
         self.root.after(0, lambda s=scanned_size: self.size_label.config(text=f"📊 Scanned: {s} ({self.stats['scanned']} files)"))
         
@@ -499,8 +499,7 @@ class TakeoutMaster:
                             # Track bytes skipped for duplicates (estimate based on file size)
                             try:
                                 dup_bytes = os.path.getsize(src_file)
-                                self.root.after(0, lambda b=self.stats["duplicates_bytes_skipped"], f=dup_bytes: 
-                                    setattr(self.stats, "duplicates_bytes_skipped", b + f))
+                                self.stats["duplicates_bytes_skipped"] += dup_bytes
                             except Exception as e:
                                 pass
                             
@@ -530,11 +529,10 @@ class TakeoutMaster:
                     try:
                         shutil.copy2(src_file, dest_p)
                         
-                        # Track copied file size
+                        # Track copied file size (direct dictionary access)
                         try:
                             copied_size = os.path.getsize(dest_p)
-                            self.root.after(0, lambda s=self.stats["total_bytes_copied"], f=copied_size: 
-                                setattr(self.stats, "total_bytes_copied", s + f))
+                            self.stats["total_bytes_copied"] += copied_size
                         except Exception as e:
                             pass
                         
@@ -604,7 +602,7 @@ class TakeoutMaster:
                         lon = group[0]['lon']
                         if lat is not None and abs(lat) > 0.01:
                             cmd.extend([f'-GPSLatitude={abs(lat)}', '-GPSLatitudeRef=N' if lat >= 0 else '-GPSLatitudeRef=S'])
-                            cmd.extend([f'-GPSLongitude={abs(lon)}', '-FPSLongitudeRef=E' if lon >= 0 else '-GPSLongitudeRef=W'])
+                            cmd.extend([f'-GPSLongitude={abs(lon)}', '-GPSLongitudeRef=E' if lon >= 0 else '-GPSLongitudeRef=W'])
                     except Exception as e:
                         self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Batch ExifTool error: {err}"))
                         continue
@@ -695,7 +693,7 @@ class TakeoutMaster:
         self.is_running = False
         self.start_btn.config(state='normal')
         
-        # Update timer and size label with final stats
+        # Update timer and size label with final stats (using dictionary access)
         total_used_str = f"⏱️  {elapsed_str} | 🗄️  Used: {copied_size}"
         self.timer_label.config(text=total_used_str, fg="green")
         self.size_label.config(text=f"📊 Scanned: {scanned_size} | Duplicates Skipped: {dup_bytes_skipped}", fg="purple")
