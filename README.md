@@ -1,32 +1,31 @@
+```markdown
 # Google Takeout Unified Reconstruction Engine
-
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20|%20macOS%20|%20Linux-blue.svg)]()
 
-
 ## Overview
 
 The **Google Takeout Unified Reconstruction Engine** is a robust Python tool designed to consolidate fragmented Google Takeout exports into a single, organized media library. It intelligently handles multi-archive structures, enriches metadata using ExifTool, and operates in a safe "Copy Mode" by default to ensure your original data remains untouched during processing.
 
-### What's New
-- ✅ **Google Drive Support:** Now processes ALL files including PDFs, DOCX, and other documents from Google Drive backups
-- ✅ **Cross-Archive Metadata Resolution:** Files with metadata in any archive are properly linked across all archives
-- ✅ **Smart No-Metadata Handling:** Only truly orphaned files go to `No_Metadata_Found` folder
-- ✅ **Enhanced Logging:** Detailed statistics tracking for better auditability
-
+### What's New (v2.1)
+- ✅ **Non-Blocking UI:** Engine now runs on background threads—no more frozen windows!
+- ✅ **Performance Tracking:** Real-time display of elapsed time and total file size processed.
+- ✅ **Unified File Placement:** Files without JSON companions are no longer segregated; they stay in their respective Album folders for consistency.
+- ✅ **Cross-Archive Metadata Resolution:** Files with metadata in any archive are properly linked across all archives.
+- ✅ **Enhanced Logging:** Detailed statistics tracking including storage usage and processing duration.
 
 ## Key Features
 
-*   ** Safe Copy Mode:** By default, files are copied rather than moved. Your original Takeout archives remain intact for verification.
-*   ** Auto-Detection:** Automatically identifies multiple `takeout-*` folders within a parent directory without manual configuration.
-*   ** Metadata Enrichment:** Injects precise Date/Time and GPS coordinates into media headers using ExifTool.
-*   ** GPS Validation:** Ignores zero-value coordinates (`0.0`) to avoid corrupting files with missing location data.
-*   ** Orphan Resolution:** Automatically re-links JSON metadata files that were separated from their media partners during migration.
-*   ** Google Drive Support:** Processes ALL file types including PDFs, DOCX, and other documents from Drive backups.
-*   ** Audit Logging:** Generates a detailed `migration_audit_log.txt` for every operation performed.
-
+*   **Safe Copy Mode:** By default, files are copied rather than moved. Your original Takeout archives remain intact for verification.
+*   **Non-Blocking GUI:** Uses Python threading to ensure the interface remains responsive during large file operations.
+*   **Auto-Detection:** Automatically identifies multiple `takeout-*` folders within a parent directory without manual configuration.
+*   **Metadata Enrichment:** Injects precise Date/Time and GPS coordinates into media headers using ExifTool (batch optimized).
+*   **GPS Validation:** Ignores zero-value coordinates (`0.0`) to avoid corrupting files with missing location data.
+*   **Unified Placement:** Media files are placed directly into their Album folders regardless of JSON companion presence, keeping your library structure clean.
+*   **Google Drive Support:** Processes ALL file types including PDFs, DOCX, and other documents from Drive backups.
+*   **Audit Logging:** Generates a detailed `migration_audit_log.txt` for every operation performed.
 
 ## Prerequisites
 
@@ -47,7 +46,6 @@ Required for metadata injection into media files.
 | **Linux** | Using package manager: `sudo apt install libimage-exiftool-perl` (Debian/Ubuntu) or `sudo yum install Image-ExifTool` (RHEL/CentOS). Verify with: `exiftool -ver`. |
 
 > ⚠️ **Note:** The tool will run without ExifTool, but metadata injection will be skipped. A warning message will appear before processing begins.
-
 
 ## Installation & Usage
 
@@ -70,7 +68,6 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
 
 > ℹ️ Note: This change applies only to the current terminal session and does not alter system-wide security settings.
 
-
 ### 3. Run the Application
 
 #### Windows
@@ -87,13 +84,11 @@ python3 takeout_fixer.py
 
 > ⚠️ **Note:** On some systems, you may need to use `python` instead of `python3`.
 
-
 ### 4. GUI Workflow
 
 1.  **Add Source Folder:** Select your parent folder containing multiple `takeout-*` archives (e.g., `E:\Testgooglefotos1`). The tool will auto-detect subfolders including Google Drive folders.
 2.  **Set Destination Folder:** Choose where the unified library will be created.
-3.  **START UNIFIED MERGE:** Click to begin processing.
-
+3.  **START UNIFIED MERGE:** Click to begin processing. The UI will remain responsive, showing real-time stats.
 
 ## Expected Output Structure
 
@@ -105,11 +100,8 @@ Destination/
 ├── Google Drive/
 │   ├── Document.pdf
 │   └── Screenshot.png
-└── No_Metadata_Found/       # Only files WITHOUT any JSON companions
-    └── Album_Name_2/
-        └── orphan_file.jpg
+└── (All files are placed directly into their Album folders for consistency)
 ```
-
 
 ## Statistics & Reporting
 
@@ -120,25 +112,26 @@ The tool generates detailed statistics during processing:
 | **Scanned** | Total files scanned across all archives |
 | **Copied** | Files successfully copied to destination |
 | **Duplicates** | Duplicate files skipped (SHA-256 hash check) |
-| **No Metadata** | Files without JSON companions |
+| **No Metadata** | Files without JSON companions (still placed in Album folders) |
 | **Metadata Found Later** | Cross-archive metadata resolution success count |
 | **Files With Metadata** | Total files with resolved metadata after Phase 2 |
 | **Missing GPS** | Files with zero-value coordinates (not injected) |
 | **Metadata Updated** | Photos successfully updated with ExifTool |
 | **Non-Media Copied** | Drive documents and other non-media files copied |
-
+| **Time Elapsed** | Total processing duration (e.g., 1h 23m) |
+| **Storage Used** | Total bytes scanned vs. total bytes copied (KB/MB/GB) |
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
 | **"exiftool not found"** | Ensure ExifTool is installed and added to your system PATH. Verify by typing `exiftool -ver` in terminal. On macOS/Linux, use Homebrew or package manager as shown above. |
+| **UI Freezes** | This should no longer happen in v2.1+. If it does, check that Python threading libraries are not restricted by antivirus software. |
 | **PowerShell Warning (Windows)** | Run the `Set-ExecutionPolicy` command as Administrator before launching Python. |
-| **No Metadata Found** | Check if `.json` or `.supplemental-metadata.json` files exist alongside your media. The tool creates a `No_Metadata_Found` folder for these items after cross-archive resolution completes. |
+| **No Metadata Found** | Check if `.json` or `.supplemental-metadata.json` files exist alongside your media. Files without JSON are now placed in their Album folders rather than a separate folder. |
 | **Duplicate Errors** | The tool uses SHA-256 hashing to prevent duplicates, but ensure you aren't selecting the same source path twice. |
 | **ExifTool Verification Failed** | Ensure ExifTool is in your PATH and executable. On Windows, verify with `exiftool -ver` returns version number like "13.55". |
 | **Permission Denied (Linux/macOS)** | Run terminal as user with write permissions to destination folder. Use `chmod +x takeout_fixer.py` if needed. |
-
 
 ## Advanced Configuration
 
@@ -150,10 +143,8 @@ If you cannot add ExifTool to your system PATH, the tool will attempt to find it
 ### Force Metadata Injection (Use with Caution)
 To skip the ExifTool warning and force metadata injection, ensure ExifTool is properly installed before starting. The tool will automatically detect it.
 
-
 ## License
 This project is licensed under the MIT License - see the LICENSE file for details.
-
 
 ## Contributing
 Contributions are welcome! Please feel free to submit a Pull Request or open an Issue for bugs and feature requests.
@@ -165,12 +156,11 @@ Contributions are welcome! Please feel free to submit a Pull Request or open an 
 4.  Push to the branch (`git push origin feature/AmazingFeature`)
 5.  Open a Pull Request
 
-
 ## Disclaimer
 
-> ⚠️ **Always back up your data before running bulk file operations, even with safety features enabled.** While this tool operates in Copy Mode by default and includes multiple safeguards, no software can guarantee zero risk during file processing. Use at your own discretion.
-
+> ⚠️ **Always back up your data before running bulk file operations, even with safety features enabled.** While this tool operates in Copy Mode by default and includes multiple safeguards (threading, hashing, verification), no software can guarantee zero risk during file processing. Use at your own discretion.
 
 **Author:** Max  https://www.linkedin.com/in/max-fuentes-22651686/
-**Version:** 2.0 (Drive Support Added)  
-**Last Updated:** 2026 
+**Version:** 2.1 (UI & Performance Update)   
+**Last Updated:** 2026
+```
