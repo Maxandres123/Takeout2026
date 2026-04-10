@@ -10,6 +10,7 @@ from collections import defaultdict
 import re
 import threading
 import queue
+import sys
 
 class TakeoutMaster:
     def __init__(self, root):
@@ -25,15 +26,34 @@ class TakeoutMaster:
         self.source_folders = []
         self.destination_folder = None
         self.report_file = None
-        self.ui_queue = queue.Queue() # Thread-safe queue for logging
+        self.ui_queue = queue.Queue() 
 
+        # Timing
+        self.start_time = None
+        self.end_time = None
+        
         # Statistics tracking
         self.stats = {
-            "scanned": 0, "copied": 0, "updated_metadata": 0, "duplicates": 0,
-            "errors": 0, "collisions": 0, "no_metadata": 0, "relinked": 0,
-            "missing_gps": 0, "metadata_update_failed": 0, "total_albums_indexed": 0,
-            "indexed_files": 0, "metadata_found_later": 0, "drive_folders_processed": 0,
-            "non_media_files_copied": 0, "files_with_metadata": 0
+            "scanned": 0, 
+            "copied": 0, 
+            "updated_metadata": 0, 
+            "duplicates": 0,
+            "errors": 0, 
+            "collisions": 0, 
+            "no_metadata": 0, 
+            "relinked": 0,
+            "missing_gps": 0, 
+            "metadata_update_failed": 0, 
+            "total_albums_indexed": 0,
+            "indexed_files": 0, 
+            "metadata_found_later": 0, 
+            "drive_folders_processed": 0,
+            "non_media_files_copied": 0, 
+            "files_with_metadata": 0,
+            # File Size Tracking (in bytes)
+            "total_bytes_scanned": 0,
+            "total_bytes_copied": 0,
+            "duplicates_bytes_skipped": 0,
         }
         
         # Indexing structures
@@ -76,6 +96,12 @@ class TakeoutMaster:
                                    font=("Arial", 12, "bold"), command=self.start_process)
         self.start_btn.pack(pady=10, fill=tk.X)
         
+        # Timer & Size Labels
+        self.timer_label = tk.Label(main, text="", fg="blue")
+        self.timer_label.pack(pady=5)
+        self.size_label = tk.Label(main, text="", fg="purple", font=("Arial", 10))
+        self.size_label.pack(pady=2)
+        
         self.log_area = scrolledtext.ScrolledText(main, height=15, state='disabled', bg="#f8f9fa")
         self.log_area.pack(fill=tk.BOTH, expand=True)
         
@@ -116,10 +142,46 @@ class TakeoutMaster:
             if self.report_file:
                 try:
                     with open(self.report_file, "a", encoding="utf-8") as f:
-                        f.write(m.replace('\n', '')) # Write without newlines for cleaner log
+                        f.write(m.replace('\n', '')) 
                 except: pass
         except Exception as e:
             print(f"Log UI Error: {e}")
+
+    def format_bytes(self, bytes_val):
+        """Format bytes into human readable string (KB, MB, GB)."""
+        if bytes_val is None or bytes_val == 0:
+            return "0 B"
+        
+        units = ['B', 'KB', 'MB', 'GB', 'TB']
+        unit_index = 0
+        size = float(bytes_val)
+        
+        while size >= 1024 and unit_index < len(units) - 1:
+            size /= 1024
+            unit_index += 1
+        
+        if unit_index == 0:
+            return f"{int(size)} {units[unit_index]}"
+        else:
+            return f"{size:.2f} {units[unit_index]}"
+
+    def format_elapsed_time(self):
+        """Format elapsed time in human readable format."""
+        if not self.start_time or not self.end_time:
+            return "0 seconds"
+        
+        elapsed = (self.end_time - self.start_time).total_seconds()
+        
+        hours = int(elapsed // 3600)
+        minutes = int((elapsed % 3600) // 60)
+        seconds = int(elapsed % 60)
+        
+        if hours > 0:
+            return f"{hours}h {minutes}m {seconds}s"
+        elif minutes > 0:
+            return f"{minutes}m {seconds}s"
+        else:
+            return f"{elapsed:.2f}s"
 
     def find_exiftool_executable(self):
         """Search for exiftool.exe in common locations and PATH."""
@@ -241,49 +303,6 @@ class TakeoutMaster:
             # Schedule UI update safely
             self.root.after(0, lambda txt=f"Target: ...{self.destination_folder[-30:]}": self.dst_label.config(text=txt, fg="green"))
 
-    def update_metadata_logic(self, media_path, timestamp, lat=None, lon=None):
-        """Update EXIF metadata using ExifTool on the given file."""
-        if not self.exiftool_available or not self.exiftool_path:
-            return False
-            
-        cmd = [self.exiftool_path, '-overwrite_original']
-        
-        # Batch processing optimization for identical timestamps
-        try:
-            dt_s = datetime.fromtimestamp(int(timestamp)).strftime('%Y:%m:%d %H:%M:%S')
-            
-            cmd.extend([
-                f'-DateTimeOriginal={dt_s}',
-                f'-CreateDate={dt_s}',
-                f'-ModifyDate={dt_s}',
-            ])
-            
-            if lat is not None and lon is not None:
-                # Safety check for GPS coordinates (avoid 0,0)
-                if abs(lat) > 0.01 or abs(lon) > 0.01:
-                    cmd.extend([
-                        f'-GPSLatitude={abs(lat)}',
-                        f'-GPSLongitude={abs(lon)}',
-                        '-GPSLatitudeRef=N' if lat >= 0 else '-GPSLatitudeRef=S',
-                        '-GPSLongitudeRef=E' if lon >= 0 else '-GPSLongitudeRef=W',
-                    ])
-                else:
-                    self.root.after(0, lambda: self._log_safe("⚠️ Missing GPS coordinates"))
-            
-            cmd.append(media_path)
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, shell=False)
-            
-            if result.returncode != 0:
-                # Log stderr for debugging without blocking UI
-                self.root.after(0, lambda err=result.stderr[:100]: self._log_safe(f"⚠️ ExifTool failed: {err}"))
-                return False
-                
-            return True
-        except Exception as e:
-            self.root.after(0, lambda err=str(e)[:100]: self._log_safe(f"⚠️ Metadata update FAILED for {media_path}: {err}"))
-            return False
-
     def start_process(self):
         if not self.source_folders or not self.destination_folder:
             messagebox.showerror("Error", "Select sources and destination!")
@@ -304,8 +323,20 @@ class TakeoutMaster:
                 return
         
         if not self.is_running:
+            # Reset timing and counters
+            self.start_time = datetime.now()
+            self.end_time = None
+            
+            # Initialize file size tracking for this run
+            self.stats["total_bytes_scanned"] = 0
+            self.stats["total_bytes_copied"] = 0
+            self.stats["duplicates_bytes_skipped"] = 0
+            
             self.start_btn.config(state='disabled')
             self.is_running = True
+            
+            # Clear previous stats display
+            self.root.after(0, lambda: self.size_label.config(text="Initializing..."))
             
             # Run in background thread to prevent UI freeze
             self.process_thread = threading.Thread(target=self.run_engine)
@@ -315,12 +346,6 @@ class TakeoutMaster:
             messagebox.showinfo("Started", "Processing has begun. This may take a while.")
         else:
             messagebox.showwarning("Busy", "Process is already running!")
-
-    def _update_stats_safe(self, key):
-        """Thread-safe stat update."""
-        # Just incrementing integers is thread safe in Python GIL context mostly, 
-        # but UI display should be handled on main thread.
-        pass 
 
     def run_engine(self):
         seen_hashes = set()
@@ -364,7 +389,16 @@ class TakeoutMaster:
                     
                     for f_name in payload_files:
                         self.stats["scanned"] += 1
+                        
+                        # Track file size during scan
                         src_file = os.path.join(current_dir, f_name)
+                        try:
+                            file_size = os.path.getsize(src_file)
+                            self.root.after(0, lambda s=self.stats["total_bytes_scanned"], f=file_size: 
+                                setattr(self.stats, "total_bytes_scanned", s + f))
+                        except Exception as e:
+                            pass
+                        
                         is_media = f_name.lower().endswith(media_exts)
                         
                         file_info = {
@@ -374,7 +408,7 @@ class TakeoutMaster:
                             "is_drive_folder": is_drive_folder,
                             "has_json": False,
                             "json_sources": [],
-                            "timestamp_val": None # Store parsed timestamp for batching
+                            "timestamp_val": None 
                         }
                         
                         # Check for JSON companion
@@ -406,6 +440,10 @@ class TakeoutMaster:
             except Exception as e:
                 self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Error scanning {src_root}: {err}"))
 
+        # Report scan stats
+        scanned_size = self.format_bytes(self.stats["total_bytes_scanned"])
+        self.root.after(0, lambda s=scanned_size: self.size_label.config(text=f"📊 Scanned: {s} ({self.stats['scanned']} files)"))
+        
         self.stats["indexed_files"] = len(self.master_file_index)
         self.stats["total_albums_indexed"] = len(self.album_to_files)
         
@@ -457,23 +495,24 @@ class TakeoutMaster:
                         
                         if h in seen_hashes:
                             self.stats["duplicates"] += 1
+                            
+                            # Track bytes skipped for duplicates (estimate based on file size)
+                            try:
+                                dup_bytes = os.path.getsize(src_file)
+                                self.root.after(0, lambda b=self.stats["duplicates_bytes_skipped"], f=dup_bytes: 
+                                    setattr(self.stats, "duplicates_bytes_skipped", b + f))
+                            except Exception as e:
+                                pass
+                            
                             continue
                         seen_hashes.add(h)
                     except Exception as e:
                         self.stats["errors"] += 1
                         continue
                     
-                    # Determine Target Directory (No Metadata Folder logic)
+                    # All files now go to the main Album Directory for consistency.
                     final_target_dir = target_dir
-                    
-                    if not file_info.get("has_json"):
-                        final_target_dir = os.path.join(self.destination_folder, "No_Metadata_Found", album_name)
-                        try:
-                            if not os.path.exists(final_target_dir):
-                                os.makedirs(final_target_dir, exist_ok=True)
-                        except Exception as e:
-                            self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Could not create folder: {err}"))
-                            
+
                     # 2. Final Copy Execution
                     dest_p = os.path.join(final_target_dir, f_name)
                     
@@ -490,6 +529,14 @@ class TakeoutMaster:
                         
                     try:
                         shutil.copy2(src_file, dest_p)
+                        
+                        # Track copied file size
+                        try:
+                            copied_size = os.path.getsize(dest_p)
+                            self.root.after(0, lambda s=self.stats["total_bytes_copied"], f=copied_size: 
+                                setattr(self.stats, "total_bytes_copied", s + f))
+                        except Exception as e:
+                            pass
                         
                         # Copy JSON companion files for Drive folders too!
                         for js in file_info.get("json_sources", []):
@@ -539,7 +586,6 @@ class TakeoutMaster:
                 # Group updates by exact string value of timestamp
                 batches = defaultdict(list)
                 for item in metadata_updates:
-                    # Use a key that includes lat/lon to ensure we don't mix GPS coords incorrectly if not needed
                     batch_key = f"{item['ts']}_{item.get('lat', 0)}_{item.get('lon', 0)}"
                     batches[batch_key].append(item)
 
@@ -558,7 +604,7 @@ class TakeoutMaster:
                         lon = group[0]['lon']
                         if lat is not None and abs(lat) > 0.01:
                             cmd.extend([f'-GPSLatitude={abs(lat)}', '-GPSLatitudeRef=N' if lat >= 0 else '-GPSLatitudeRef=S'])
-                            cmd.extend([f'-GPSLongitude={abs(lon)}', '-GPSLongitudeRef=E' if lon >= 0 else '-GPSLongitudeRef=W'])
+                            cmd.extend([f'-GPSLongitude={abs(lon)}', '-FPSLongitudeRef=E' if lon >= 0 else '-GPSLongitudeRef=W'])
                     except Exception as e:
                         self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Batch ExifTool error: {err}"))
                         continue
@@ -615,29 +661,68 @@ class TakeoutMaster:
         except Exception as e:
             self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Fatal Error during Phase 3: {err}"))
             
+        # ===================== CALCULATE ELAPSED TIME & FINAL SIZE =====================
+        self.end_time = datetime.now()
+        elapsed_str = self.format_elapsed_time()
+        
+        copied_size = self.format_bytes(self.stats["total_bytes_copied"])
+        scanned_size = self.format_bytes(self.stats["total_bytes_scanned"])
+        dup_bytes_skipped = self.format_bytes(self.stats["duplicates_bytes_skipped"])
+        
         # ===================== FINAL REPORT =====================
-        report = (f"\n--- FINAL REPORT ---\n"
-                  f"Scanned:              {self.stats['scanned']}\n"
-                  f"Copied:               {self.stats['copied']}  <-- Original files preserved\n"
-                  f"Duplicates:           {self.stats['duplicates']}\n"
-                  f"No Metadata:          {self.stats['no_metadata']}\n"
-                  f"Metadata Found Later: {self.stats['metadata_found_later']}\n"
-                  f"Files With Metadata:  {self.stats['files_with_metadata']}  <-- RESOLVED!\n"
-                  f"Missing GPS:          {self.stats['missing_gps']}\n"
-                  f"Metadata Updated:     {self.stats['updated_metadata']}  <-- Photos only\n"
-                  f"Non-Media Copied:     {self.stats['non_media_files_copied']}  <-- Drive files!\n"
-                  f"Albums Indexed:       {self.stats['total_albums_indexed']}\n"
-                  f"Files Indexed:        {self.stats['indexed_files']}\n"
-                  f"Errors:               {self.stats['errors']}")
+        report = (f"\n{'='*60}\n"
+                  f"📊 FINAL REPORT\n"
+                  f"{'='*60}\n"
+                  f"⏱️  Total Time Elapsed:   {elapsed_str}\n"
+                  f"🗄️  Storage Used:\n"
+                  f"    Scanned:              {scanned_size} ({self.stats['scanned']} files)\n"
+                  f"    Copied:               {copied_size} ({self.stats['copied']} files)\n"
+                  f"    Duplicates Skipped:   {dup_bytes_skipped}\n"
+                  f"\n🔍 Files Statistics:\n"
+                  f"✅ Copied Files:          {self.stats['copied']}  <-- Original files preserved\n"
+                  f"🔄 Duplicates:            {self.stats['duplicates']}\n"
+                  f"📁 No Metadata (No JSON):{self.stats['no_metadata']}  <-- No Google Takeout JSON found\n"
+                  f"📍 Metadata Found Later:  {self.stats['metadata_found_later']}\n"
+                  f"📄 Files With Metadata:   {self.stats['files_with_metadata']}  <-- RESOLVED!\n"
+                  f"🌎 Missing GPS:           {self.stats['missing_gps']}\n"
+                  f"⚙️  Metadata Updated:      {self.stats['updated_metadata']}  <-- Photos only\n"
+                  f"📁 Non-Media Copied:      {self.stats['non_media_files_copied']}  <-- Drive files!\n"
+                  f"🗂️  Albums Indexed:        {self.stats['total_albums_indexed']}\n"
+                  f"🔢 Files Indexed:         {self.stats['indexed_files']}\n"
+                  f"❌ Errors:                {self.stats['errors']}")
         
         self.root.after(0, lambda r=report: self._log_safe(r))
         self.is_running = False
         self.start_btn.config(state='normal')
         
+        # Update timer and size label with final stats
+        total_used_str = f"⏱️  {elapsed_str} | 🗄️  Used: {copied_size}"
+        self.timer_label.config(text=total_used_str, fg="green")
+        self.size_label.config(text=f"📊 Scanned: {scanned_size} | Duplicates Skipped: {dup_bytes_skipped}", fg="purple")
+        
         if not self.exiftool_available:
             messagebox.showwarning("Warning", "ExifTool was NOT available! Metadata injection was SKIPPED.")
             
-        messagebox.showinfo("Done", "Copy Complete! Check log for metadata update status.\nNote: Drive files copied without metadata injection.")
+        messagebox.showinfo("Done", f"Copy Complete in {elapsed_str}!\nTotal Storage Used: {copied_size}\nCheck log for metadata update status.\nNote: Drive files copied without metadata injection.")
+
+    def _update_log_display(self, m):
+        """Update the log widget (Must run on Main Thread)."""
+        try:
+            if not hasattr(self, 'log_area'): return
+            
+            self.log_area.config(state='normal')
+            self.log_area.insert(tk.END, m)
+            self.log_area.see(tk.END)
+            self.log_area.config(state='disabled')
+            
+            # Also write to report file if open
+            if self.report_file:
+                try:
+                    with open(self.report_file, "a", encoding="utf-8") as f:
+                        f.write(m.replace('\n', '')) 
+                except: pass
+        except Exception as e:
+            print(f"Log UI Error: {e}")
 
 if __name__ == "__main__":
     root = tk.Tk()
