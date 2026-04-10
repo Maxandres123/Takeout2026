@@ -1,0 +1,1 @@
+# Requirements for Python scripts project
