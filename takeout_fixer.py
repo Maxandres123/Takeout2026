@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 from datetime import datetime
 from collections import defaultdict
+import re
 
 class TakeoutMaster:
     def __init__(self, root):
@@ -78,7 +79,7 @@ class TakeoutMaster:
         self.log_area.pack(fill=tk.BOTH, expand=True)
 
     def find_exiftool_executable(self):
-        """Search for exiftool.exe in common locations."""
+        """Search for exiftool.exe in common locations and PATH."""
         possible_paths = [
             r"C:\Windows\System32\exiftool.exe",
             os.path.join(os.environ.get('WINDIR', 'C:\\Windows'), 'System32\\exiftool.exe'),
@@ -89,14 +90,23 @@ class TakeoutMaster:
             if os.path.exists(path):
                 return path
         
-        # If not found in specific paths, try searching PATH environment variable
+        # Search PATH environment variable
         search_dirs = os.environ.get('PATH', '').split(';')
         for directory in search_dirs:
             exe_path = os.path.join(directory.strip(), 'exiftool.exe')
             if os.path.exists(exe_path):
+                self.log(f"🔍 Found ExifTool at: {exe_path}")  # Debug log
                 return exe_path
         
         return None
+
+    def is_valid_version(self, version_string):
+        """Check if output looks like a valid ExifTool version number."""
+        if not version_string or not isinstance(version_string, str):
+            return False
+        # Version numbers typically look like "13.55" (digits and dots)
+        pattern = r'^\d+\.\d+'
+        return bool(re.match(pattern, version_string.strip()))
 
     def check_exiftool_on_startup(self):
         """Check if ExifTool is available using absolute paths."""
@@ -109,16 +119,28 @@ class TakeoutMaster:
         
         try:
             # Use absolute path for verification to avoid PATH issues
-            result = subprocess.run([exefile, '-ver'], capture_output=True, text=True, timeout=5)
+            result = subprocess.run(
+                [exefile, '-ver'], 
+                capture_output=True, 
+                text=True, 
+                timeout=5,
+                shell=False
+            )
             
-            if result.returncode == 0 and 'ExifTool' in result.stdout:
+            self.log(f"Verification Debug: returncode={result.returncode}")
+            self.log(f"Verification Debug: stdout='{result.stdout}'")
+            self.log(f"Verification Debug: stderr='{result.stderr}'")
+            
+            # Check if version output is valid (numeric format like "13.55")
+            version_output = result.stdout.strip()
+            
+            if result.returncode == 0 and self.is_valid_version(version_output):
                 self.exiftool_available = True
-                version = result.stdout.strip().split('\n')[0]
-                self.log(f"✅ ExifTool detected at {exefile}: {version}")
+                self.log(f"✅ ExifTool detected at {exefile}: {version_output}")
                 self.exiftool_path = exefile
-                self.exiftool_status.config(text=f"✅ ExifTool Available ({version})", fg="green")
+                self.exiftool_status.config(text=f"✅ ExifTool Available ({version_output})", fg="green")
             else:
-                raise Exception("Verification failed")
+                raise Exception("Verification failed - invalid version output format")
         except Exception as e:
             self.log(f"⚠️ ExifTool found but verification failed: {e}")
             self.exiftool_status.config(text="⚠️ ExifTool NOT Configured", fg="red")
