@@ -32,7 +32,9 @@ class TakeoutMaster:
             "metadata_update_failed": 0,
             "total_albums_indexed": 0,
             "indexed_files": 0,
-            "metadata_found_later": 0
+            "metadata_found_later": 0,
+            "drive_folders_processed": 0,
+            "non_media_files_copied": 0
         }
         
         # Indexing structures
@@ -50,7 +52,7 @@ class TakeoutMaster:
         main = tk.Frame(self.root, padx=20, pady=20)
         main.pack(fill=tk.BOTH, expand=True)
 
-        tk.Label(main, text="Google Takeout Professional Merger", font=("Arial", 16, "bold")).pack(pady=10)
+        tk.Label(main, text="Google Takeout Unified Reconstruction Engine", font=("Arial", 16, "bold")).pack(pady=10)
 
         self.src_list = tk.Listbox(main, height=8)
         self.src_list.pack(fill=tk.X)
@@ -95,7 +97,7 @@ class TakeoutMaster:
         for directory in search_dirs:
             exe_path = os.path.join(directory.strip(), 'exiftool.exe')
             if os.path.exists(exe_path):
-                self.log(f"🔍 Found ExifTool at: {exe_path}")  # Debug log
+                self.log(f"🔍 Found ExifTool at: {exe_path}")
                 return exe_path
         
         return None
@@ -104,7 +106,6 @@ class TakeoutMaster:
         """Check if output looks like a valid ExifTool version number."""
         if not version_string or not isinstance(version_string, str):
             return False
-        # Version numbers typically look like "13.55" (digits and dots)
         pattern = r'^\d+\.\d+'
         return bool(re.match(pattern, version_string.strip()))
 
@@ -118,7 +119,6 @@ class TakeoutMaster:
             return
         
         try:
-            # Use absolute path for verification to avoid PATH issues
             result = subprocess.run(
                 [exefile, '-ver'], 
                 capture_output=True, 
@@ -131,7 +131,6 @@ class TakeoutMaster:
             self.log(f"Verification Debug: stdout='{result.stdout}'")
             self.log(f"Verification Debug: stderr='{result.stderr}'")
             
-            # Check if version output is valid (numeric format like "13.55")
             version_output = result.stdout.strip()
             
             if result.returncode == 0 and self.is_valid_version(version_output):
@@ -170,13 +169,15 @@ class TakeoutMaster:
                 full_path = os.path.join(parent_path, item)
                 if os.path.isdir(full_path) and item.lower().startswith("takeout"):
                     photos_found = False
+                    files_found = False
                     for root, dirs, files in os.walk(full_path):
                         for f in files:
                             if any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.mp4']):
                                 photos_found = True; break
-                        if photos_found: break
-                    if photos_found or item.lower().startswith("takeout"):
-                        takeout_dirs.append(full_path)
+                            if not f.lower().endswith(('.json', '.txt')):
+                                files_found = True; break
+                        if photos_found or files_found: break
+                    takeout_dirs.append(full_path)
         except Exception as e:
             self.log(f"⚠️ Could not scan for Takeout folders in {parent_path}: {e}")
         
@@ -238,7 +239,6 @@ class TakeoutMaster:
             
             cmd.append(media_path)
             
-            # Run with shell=False for better control on Windows
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, shell=False)
             
             if result.returncode != 0:
@@ -301,13 +301,28 @@ class TakeoutMaster:
                 if not takeout_anchor:
                     takeout_anchor = src_root
 
+                # Track Drive folder separately (Google Drive backup)
+                is_drive_folder = False
+                drive_subfolders = []
+                
+                for current_dir, dirs, files in os.walk(takeout_anchor):
+                    if any(x in current_dir.lower() for x in ["trash", "papelera"]): 
+                        continue
+                    
+                    # Detect Google Drive folder
+                    if "drive" in os.path.basename(current_dir).lower():
+                        is_drive_folder = True
+                        drive_subfolders.append(os.path.relpath(current_dir, takeout_anchor))
+
+                self.log(f"📂 Drive folders found: {len(drive_subfolders)}")
+                
                 for current_dir, dirs, files in os.walk(takeout_anchor):
                     if any(x in current_dir.lower() for x in ["trash", "papelera"]): 
                         continue
                     
                     rel_path = os.path.relpath(current_dir, takeout_anchor)
                     
-                    media_files = [f for f in files if f.lower().endswith(media_exts)]
+                    # Include ALL file types (not just media)
                     payload_files = [f for f in files if not f.lower().endswith(('.json', '.txt'))]
 
                     if not payload_files: 
@@ -324,11 +339,26 @@ class TakeoutMaster:
                             "src_file": src_file,
                             "rel_path": rel_path,
                             "album_name": album_name,
+                            "is_drive_folder": is_drive_folder or "drive" in current_dir.lower(),
                             "has_json": False,
                             "json_sources": []
                         }
                         
                         if is_media:
+                            self.album_to_files[album_name].append(file_info)
+                            
+                            for s in [".supplemental-metadata.json", ".json"]:
+                                cand = src_file + s if not src_file.endswith(".json") else src_file.replace(".json", s)
+                                if os.path.exists(cand):
+                                    file_info["has_json"] = True
+                                    file_info["json_sources"].append({
+                                        "path": cand,
+                                        "src_root": os.path.basename(src_root),
+                                        "rel_path": rel_path
+                                    })
+                        
+                        # Also index Drive files (non-media)
+                        if not is_media:
                             self.album_to_files[album_name].append(file_info)
                             
                             for s in [".supplemental-metadata.json", ".json"]:
@@ -376,7 +406,7 @@ class TakeoutMaster:
             self.log(f"⚠️ Error during metadata resolution: {e}")
 
         # ===================== PHASE 3: COPY & INJECT (Based on Resolved Index) =====================
-        self.log("🔍 Phase 3: Executing copy operations based on resolved index...")
+        self.log("🔍 Phase 3: Executing copy operations for ALL file types...")
         
         try:
             for album_name, files in self.album_to_files.items():
@@ -405,8 +435,9 @@ class TakeoutMaster:
                         self.stats["errors"] += 1
                         continue
                     
-                    # Determine final destination
-                    if not file_info.get("has_json"):
+                    # Determine final destination (include Drive files too!)
+                    if not file_info.get("has_json") and "drive" in album_name.lower():
+                        # Store Drive files without metadata separately
                         self.stats["no_metadata"] += 1
                         final_target_dir = os.path.join(self.destination_folder, "No_Metadata_Found", album_name)
                         
@@ -434,13 +465,14 @@ class TakeoutMaster:
                     try:
                         shutil.copy2(src_file, dest_p)
                         
+                        # Copy JSON companion files for Drive folders too!
                         for js in file_info.get("json_sources", []):
                             if os.path.exists(js["path"]) and not os.path.exists(dest_p + ".json"):
                                 shutil.copy2(js["path"], dest_p + ".json")
                             
                         self.stats["copied"] += 1
                         
-                        # Metadata Update on DESTINATION copy (Only if ExifTool is available)
+                        # Metadata Update on DESTINATION copy (Only for media with ExifTool)
                         if file_info.get("has_json") and file_info["json_sources"] and self.exiftool_available:
                             try:
                                 json_path = file_info["json_sources"][0]["path"]
@@ -460,7 +492,7 @@ class TakeoutMaster:
                                 if lat == 0.0 and lon == 0.0:
                                     self.stats["missing_gps"] += 1
                                 
-                                if ts and self.update_metadata_logic(dest_p, ts, lat, lon):
+                                if ts and file_info["src_file"].lower().endswith(('.jpg', '.jpeg', '.png')) and self.update_metadata_logic(dest_p, ts, lat, lon):
                                     self.log(f"✅ Metadata updated for {f_name}")
                                     self.stats["updated_metadata"] += 1
                             except Exception as e:
@@ -470,6 +502,10 @@ class TakeoutMaster:
                     except Exception as e:
                         self.log(f"⚠️ File copy error for {f_name}: {e}")
                         self.stats["errors"] += 1
+                        
+                        # Track non-media files copied separately
+                        if not file_info["src_file"].lower().endswith(media_exts):
+                            self.stats["non_media_files_copied"] += 1
         except Exception as e:
             self.log(f"⚠️ Error during Phase 3: {e}")
 
@@ -507,16 +543,17 @@ class TakeoutMaster:
 
         # ===================== FINAL REPORT =====================
         report = (f"\n--- FINAL REPORT ---\n"
-                  f"Scanned:         {self.stats['scanned']}\n"
-                  f"Copied:          {self.stats['copied']}  <-- Original files preserved\n"
-                  f"Duplicates:      {self.stats['duplicates']}\n"
-                  f"No Metadata:     {self.stats['no_metadata']}\n"
-                  f"Metadata Found Later (from other archives): {self.stats['metadata_found_later']}\n"
-                  f"Missing GPS:     {self.stats['missing_gps']}\n"
-                  f"Metadata Update Failed: {self.stats['metadata_update_failed']}  <-- Check this!\n"
-                  f"Albums Indexed:  {self.stats['total_albums_indexed']}\n"
-                  f"Files Indexed:   {self.stats['indexed_files']}\n"
-                  f"Errors:          {self.stats['errors']}")
+                  f"Scanned:              {self.stats['scanned']}\n"
+                  f"Copied:               {self.stats['copied']}  <-- Original files preserved\n"
+                  f"Duplicates:           {self.stats['duplicates']}\n"
+                  f"No Metadata:          {self.stats['no_metadata']}\n"
+                  f"Metadata Found Later: {self.stats['metadata_found_later']}\n"
+                  f"Missing GPS:          {self.stats['missing_gps']}\n"
+                  f"Metadata Updated:     {self.stats['updated_metadata']}  <-- Photos only\n"
+                  f"Non-Media Copied:     {self.stats['non_media_files_copied']}  <-- Drive files!\n"
+                  f"Albums Indexed:       {self.stats['total_albums_indexed']}\n"
+                  f"Files Indexed:        {self.stats['indexed_files']}\n"
+                  f"Errors:               {self.stats['errors']}")
 
         self.log(report)
         self.start_btn.config(state='normal')
@@ -524,7 +561,7 @@ class TakeoutMaster:
         if not self.exiftool_available:
             messagebox.showwarning("Warning", "ExifTool was NOT available! Metadata injection was SKIPPED.\n\nTo enable metadata:\n1. Download ExifTool from https://exiftool.org/\n2. Extract it to a folder (e.g., C:\\Tools)\n3. Add that folder to Windows PATH Environment Variables\n4. Restart this script.")
         
-        messagebox.showinfo("Done", "Copy Complete! Check log for metadata update status.")
+        messagebox.showinfo("Done", "Copy Complete! Check log for metadata update status.\nNote: Drive files copied without metadata injection.")
 
 
 if __name__ == "__main__":
