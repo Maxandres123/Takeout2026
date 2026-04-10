@@ -216,7 +216,7 @@ class TakeoutMaster:
         if not self.exiftool_available or not self.exiftool_path:
             return False
             
-        cmd = [self.exiftool_path, '-overwrite_original', '-all']
+        cmd = [self.exiftool_path, '-overwrite_original']
         try:
             dt_s = datetime.fromtimestamp(int(timestamp)).strftime('%Y:%m:%d %H:%M:%S')
             
@@ -225,9 +225,6 @@ class TakeoutMaster:
                 f'-DateTimeOriginal={dt_s}',      # When photo was originally taken (most important)
                 f'-CreateDate={dt_s}',           # File creation time (Windows "Date Created")
                 f'-ModifyDate={dt_s}',           # File modification time (Windows "Date Modified")
-                f'-FileModifyDate={dt_s}',       # Windows file system modify time
-                f'-MediaCreateDate={dt_s}',      # Common video/photo creation tag
-                f'-MediaModifyDate={dt_s}',      # Common video/photo modify tag
             ])
             
             if lat is not None and lon is not None:
