@@ -721,7 +721,7 @@ class TakeoutMaster:
                 except: pass
         except Exception as e:
             print(f"Log UI Error: {e}")
-
+# ===================== MAIN APPLICATION ENTRY POINT =====================
 if __name__ == "__main__":
     root = tk.Tk()
     app = TakeoutMaster(root)
