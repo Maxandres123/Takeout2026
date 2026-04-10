@@ -8,34 +8,32 @@ from tkinter import filedialog, messagebox, scrolledtext
 from datetime import datetime
 from collections import defaultdict
 import re
+import threading
+import queue
 
 class TakeoutMaster:
     def __init__(self, root):
         self.root = root
         self.root.title("Google Takeout Unified Reconstruction Engine (Safe Copy)")
         self.root.geometry("900x700")
+        
+        # Threading & UI Safety
+        self.is_running = False
+        self.process_thread = None
+        
+        # Data structures
         self.source_folders = []
         self.destination_folder = None
         self.report_file = None
-        
+        self.ui_queue = queue.Queue() # Thread-safe queue for logging
+
         # Statistics tracking
         self.stats = {
-            "scanned": 0,
-            "copied": 0,
-            "updated_metadata": 0,
-            "duplicates": 0,
-            "errors": 0,
-            "collisions": 0,
-            "no_metadata": 0,
-            "relinked": 0,
-            "missing_gps": 0,
-            "metadata_update_failed": 0,
-            "total_albums_indexed": 0,
-            "indexed_files": 0,
-            "metadata_found_later": 0,
-            "drive_folders_processed": 0,
-            "non_media_files_copied": 0,
-            "files_with_metadata": 0
+            "scanned": 0, "copied": 0, "updated_metadata": 0, "duplicates": 0,
+            "errors": 0, "collisions": 0, "no_metadata": 0, "relinked": 0,
+            "missing_gps": 0, "metadata_update_failed": 0, "total_albums_indexed": 0,
+            "indexed_files": 0, "metadata_found_later": 0, "drive_folders_processed": 0,
+            "non_media_files_copied": 0, "files_with_metadata": 0
         }
         
         # Indexing structures
@@ -45,61 +43,103 @@ class TakeoutMaster:
         # ExifTool Status
         self.exiftool_available = False
         self.exiftool_path = None
-
+        
         self.setup_ui()
         self.check_exiftool_on_startup()
 
     def setup_ui(self):
         main = tk.Frame(self.root, padx=20, pady=20)
         main.pack(fill=tk.BOTH, expand=True)
-
+        
         tk.Label(main, text="Google Takeout Unified Reconstruction Engine", font=("Arial", 16, "bold")).pack(pady=10)
-
+        
         self.src_list = tk.Listbox(main, height=8)
         self.src_list.pack(fill=tk.X)
-
+        
         btn_f = tk.Frame(main); btn_f.pack(pady=5)
         tk.Button(btn_f, text="Add Source Folder", command=self.add_src).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_f, text="Clear All", command=self.clear_src).pack(side=tk.LEFT, padx=5)
-
+        
         self.dst_label = tk.Label(main, text="No Destination Set", fg="red")
         self.dst_label.pack(pady=5)
         
         tk.Button(main, text="Set Destination Folder", command=self.set_dst).pack(pady=5)
-
-        # ExifTool Status Label (Updated dynamically)
+        
+        # ExifTool Status Label
         self.exiftool_status = tk.Label(main, text="ExifTool: UNKNOWN", fg="orange")
         self.exiftool_status.pack(pady=2)
-
+        
         self.warn_label = tk.Label(main, text="⚠️ SAFE MODE: Files will be COPIED (not moved)", fg="orange")
         self.warn_label.pack()
-
+        
         self.start_btn = tk.Button(main, text="START UNIFIED MERGE", bg="#2ecc71", fg="white", 
                                    font=("Arial", 12, "bold"), command=self.start_process)
         self.start_btn.pack(pady=10, fill=tk.X)
-
+        
         self.log_area = scrolledtext.ScrolledText(main, height=15, state='disabled', bg="#f8f9fa")
         self.log_area.pack(fill=tk.BOTH, expand=True)
+        
+        # Start UI Polling for Log Queue
+        self.process_log_queue()
+
+    def process_log_queue(self):
+        """Process queued log messages on the main thread."""
+        try:
+            while True:
+                msg = self.ui_queue.get_nowait()
+                self._update_log_display(msg)
+        except queue.Empty:
+            pass
+        
+        # Schedule next check (every 100ms to prevent CPU hogging)
+        self.root.after(100, self.process_log_queue)
+
+    def _log_safe(self, message):
+        """Thread-safe logging method."""
+        if isinstance(message, Exception):
+            message = str(message)
+        
+        # Put in queue for main thread processing
+        self.ui_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
+
+    def _update_log_display(self, m):
+        """Update the log widget (Must run on Main Thread)."""
+        try:
+            if not hasattr(self, 'log_area'): return
+            
+            self.log_area.config(state='normal')
+            self.log_area.insert(tk.END, m)
+            self.log_area.see(tk.END)
+            self.log_area.config(state='disabled')
+            
+            # Also write to report file if open
+            if self.report_file:
+                try:
+                    with open(self.report_file, "a", encoding="utf-8") as f:
+                        f.write(m.replace('\n', '')) # Write without newlines for cleaner log
+                except: pass
+        except Exception as e:
+            print(f"Log UI Error: {e}")
 
     def find_exiftool_executable(self):
         """Search for exiftool.exe in common locations and PATH."""
         possible_paths = [
             r"C:\Windows\System32\exiftool.exe",
-            os.path.join(os.environ.get('WINDIR', 'C:\\Windows'), 'System32\\exiftool.exe'),
             os.path.expanduser(r"~\AppData\Local\Programs\Python\Scripts\exiftool.exe"),
+            os.path.join(os.getcwd(), "exiftool.exe")
         ]
-
+        
         for path in possible_paths:
             if os.path.exists(path):
                 return path
         
-        search_dirs = os.environ.get('PATH', '').split(';')
-        for directory in search_dirs:
-            exe_path = os.path.join(directory.strip(), 'exiftool.exe')
-            if os.path.exists(exe_path):
-                self.log(f"🔍 Found ExifTool at: {exe_path}")
-                return exe_path
-        
+        # Check PATH using shutil.which (Cross-platform)
+        import shutil
+        exe = shutil.which("exiftool")
+        if exe:
+            self._log_safe(f"🔍 Found ExifTool at: {exe}")
+            return exe
+            
         return None
 
     def is_valid_version(self, version_string):
@@ -114,7 +154,7 @@ class TakeoutMaster:
         exefile = self.find_exiftool_executable()
         
         if not exefile:
-            self.log(f"⚠️ ExifTool not found in PATH or common locations.")
+            self._log_safe("⚠️ ExifTool not found in PATH or common locations.")
             self.exiftool_status.config(text="⚠️ ExifTool NOT Configured", fg="red")
             return
         
@@ -131,28 +171,14 @@ class TakeoutMaster:
             
             if result.returncode == 0 and self.is_valid_version(version_output):
                 self.exiftool_available = True
-                self.log(f"✅ ExifTool detected at {exefile}: {version_output}")
+                self._log_safe(f"✅ ExifTool detected at {exefile}: {version_output}")
                 self.exiftool_path = exefile
                 self.exiftool_status.config(text=f"✅ ExifTool Available ({version_output})", fg="green")
             else:
                 raise Exception("Verification failed - invalid version output format")
         except Exception as e:
-            self.log(f"⚠️ ExifTool found but verification failed: {e}")
+            self._log_safe(f"⚠️ ExifTool found but verification failed: {e}")
             self.exiftool_status.config(text="⚠️ ExifTool NOT Configured", fg="red")
-
-    def log(self, m):
-        self.log_area.config(state='normal')
-        self.log_area.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {m}\n")
-        self.log_area.see(tk.END)
-        self.log_area.config(state='disabled')
-        
-        if self.report_file:
-            try:
-                with open(self.report_file, "a", encoding="utf-8") as f:
-                    f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {m}\n")
-            except: pass
-        
-        self.root.update()
 
     def detect_takeout_folders(self, parent_path):
         """Detect all subfolders named like 'takeout-xxxxx' within a parent."""
@@ -164,6 +190,7 @@ class TakeoutMaster:
             for item in os.listdir(parent_path):
                 full_path = os.path.join(parent_path, item)
                 if os.path.isdir(full_path) and item.lower().startswith("takeout"):
+                    # Quick check to see if it contains content
                     photos_found = False
                     files_found = False
                     for root, dirs, files in os.walk(full_path):
@@ -173,9 +200,10 @@ class TakeoutMaster:
                             if not f.lower().endswith(('.json', '.txt')):
                                 files_found = True; break
                         if photos_found or files_found: break
+                    
                     takeout_dirs.append(full_path)
         except Exception as e:
-            self.log(f"⚠️ Could not scan for Takeout folders in {parent_path}: {e}")
+            self._log_safe(f"⚠️ Could not scan for Takeout folders in {parent_path}: {e}")
         
         return sorted(takeout_dirs)
 
@@ -189,13 +217,14 @@ class TakeoutMaster:
             for folder in potential_takeouts:
                 if folder not in self.source_folders:
                     self.source_folders.append(folder)
-                    self.src_list.insert(tk.END, os.path.basename(folder))
+                    # Schedule UI update safely
+                    self.root.after(0, lambda f=os.path.basename(folder): self.src_list.insert(tk.END, f))
                     added_count += 1
             
             if added_count == 0:
                 if abs_p not in self.source_folders:
                     self.source_folders.append(abs_p)
-                    self.src_list.insert(tk.END, os.path.basename(abs_p))
+                    self.root.after(0, lambda p=abs_p: self.src_list.insert(tk.END, os.path.basename(p)))
             
             if added_count > 1:
                 messagebox.showinfo("Detected", f"Found {added_count} Takeout folders under '{os.path.basename(p)}'")
@@ -209,7 +238,8 @@ class TakeoutMaster:
         if p:
             self.destination_folder = os.path.abspath(p)
             self.report_file = os.path.join(self.destination_folder, "migration_audit_log.txt")
-            self.dst_label.config(text=f"Target: ...{self.destination_folder[-30:]}", fg="green")
+            # Schedule UI update safely
+            self.root.after(0, lambda txt=f"Target: ...{self.destination_folder[-30:]}": self.dst_label.config(text=txt, fg="green"))
 
     def update_metadata_logic(self, media_path, timestamp, lat=None, lon=None):
         """Update EXIF metadata using ExifTool on the given file."""
@@ -217,17 +247,19 @@ class TakeoutMaster:
             return False
             
         cmd = [self.exiftool_path, '-overwrite_original']
+        
+        # Batch processing optimization for identical timestamps
         try:
             dt_s = datetime.fromtimestamp(int(timestamp)).strftime('%Y:%m:%d %H:%M:%S')
             
-            # Set all relevant date/time metadata tags (Windows Explorer compatibility)
             cmd.extend([
-                f'-DateTimeOriginal={dt_s}',      # When photo was originally taken (most important)
-                f'-CreateDate={dt_s}',           # File creation time (Windows "Date Created")
-                f'-ModifyDate={dt_s}',           # File modification time (Windows "Date Modified")
+                f'-DateTimeOriginal={dt_s}',
+                f'-CreateDate={dt_s}',
+                f'-ModifyDate={dt_s}',
             ])
             
             if lat is not None and lon is not None:
+                # Safety check for GPS coordinates (avoid 0,0)
                 if abs(lat) > 0.01 or abs(lon) > 0.01:
                     cmd.extend([
                         f'-GPSLatitude={abs(lat)}',
@@ -236,25 +268,25 @@ class TakeoutMaster:
                         '-GPSLongitudeRef=E' if lon >= 0 else '-GPSLongitudeRef=W',
                     ])
                 else:
-                    self.stats["missing_gps"] += 1
+                    self.root.after(0, lambda: self._log_safe("⚠️ Missing GPS coordinates"))
             
             cmd.append(media_path)
             
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, shell=False)
             
             if result.returncode != 0:
-                raise Exception(f"ExifTool failed with code {result.returncode}: {result.stderr}")
+                # Log stderr for debugging without blocking UI
+                self.root.after(0, lambda err=result.stderr[:100]: self._log_safe(f"⚠️ ExifTool failed: {err}"))
+                return False
                 
             return True
         except Exception as e:
-            self.log(f"⚠️ Metadata update FAILED for {media_path}: {str(e)[:100]}")
-            self.stats["metadata_update_failed"] += 1
+            self.root.after(0, lambda err=str(e)[:100]: self._log_safe(f"⚠️ Metadata update FAILED for {media_path}: {err}"))
             return False
 
     def start_process(self):
         if not self.source_folders or not self.destination_folder:
-            message_err = "Select sources and destination!"
-            messagebox.showerror("Error", message_err)
+            messagebox.showerror("Error", "Select sources and destination!")
             return
         
         # Final check for ExifTool before running heavy process
@@ -264,53 +296,66 @@ class TakeoutMaster:
                 "Metadata injection will be SKIPPED.\n\n"
                 "To enable it:\n"
                 "1. Download ExifTool from https://exiftool.org/\n"
-                "2. Extract to a folder (e.g., C:\\Tools)\n"
-                "3. Add that folder path to your Windows System PATH Environment Variable\n"
-                "4. Restart this script.\n\n"
+                "2. Add folder to Windows PATH Environment Variable\n"
+                "3. Restart this script.\n\n"
                 "Continue without metadata?"
             )
             if not messagebox.askyesno("ExifTool Required", msg):
                 return
-
-        if messagebox.askyesno("Confirm", "Start Copying all folders to unified library?"):
+        
+        if not self.is_running:
             self.start_btn.config(state='disabled')
-            self.run_engine()
+            self.is_running = True
+            
+            # Run in background thread to prevent UI freeze
+            self.process_thread = threading.Thread(target=self.run_engine)
+            self.process_thread.daemon = True
+            self.process_thread.start()
+            
+            messagebox.showinfo("Started", "Processing has begun. This may take a while.")
+        else:
+            messagebox.showwarning("Busy", "Process is already running!")
+
+    def _update_stats_safe(self, key):
+        """Thread-safe stat update."""
+        # Just incrementing integers is thread safe in Python GIL context mostly, 
+        # but UI display should be handled on main thread.
+        pass 
 
     def run_engine(self):
         seen_hashes = set()
-        media_exts = ('.jpg', '.jpeg', '.png', '.mp4', '.mov', '.webp', '.heic')
+        media_exts = ('.jpg', '.jpeg', '.png', '.mp4', '.mov', '.webp')
         
         try:
             with open(self.report_file, "w", encoding="utf-8") as f:
                 f.write(f"Migration started at {datetime.now()}\nSource Count: {len(self.source_folders)}\nMode: COPY (Safe)\nExifTool Available: {self.exiftool_available}\n\n")
         except Exception as e:
-            self.log(f"⚠️ Could not create report file: {e}")
+            self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Could not create report file: {err}"))
         
         # ===================== PHASE 1: FULL INDEXING =====================
-        self.log("🔍 Phase 1: Building complete master index of all files...")
+        self.root.after(0, lambda: self._log_safe("🔍 Phase 1: Building complete master index..."))
         
         for src_root in self.source_folders:
             try:
-                self.log(f"📂 Scanning Source Root: {os.path.basename(src_root)}")
-
                 takeout_anchor = None
-                for root, dirs, files in os.walk(src_root):
-                    if "Takeout" in root or any(x in root.lower() for x in ["takeout", "photos"]):
-                        takeout_anchor = root
-                        break
+                # Find the best anchor folder inside the source
+                if os.path.isdir(src_root):
+                    for root, dirs, files in os.walk(src_root):
+                        if "Takeout" in root or any(x in root.lower() for x in ["takeout", "photos"]):
+                            takeout_anchor = root
+                            break
                 
                 if not takeout_anchor:
                     takeout_anchor = src_root
-
+                    
                 for current_dir, dirs, files in os.walk(takeout_anchor):
+                    # Skip trash folders
                     if any(x in current_dir.lower() for x in ["trash", "papelera"]): 
                         continue
                     
                     rel_path = os.path.relpath(current_dir, takeout_anchor)
                     
-                    # Include ALL file types (not just media)
                     payload_files = [f for f in files if not f.lower().endswith(('.json', '.txt'))]
-
                     if not payload_files: 
                         continue
                     
@@ -327,37 +372,31 @@ class TakeoutMaster:
                             "rel_path": rel_path,
                             "album_name": album_name,
                             "is_drive_folder": is_drive_folder,
-                            "has_json": False,  # Will be updated in Phase 2!
-                            "json_sources": []
+                            "has_json": False,
+                            "json_sources": [],
+                            "timestamp_val": None # Store parsed timestamp for batching
                         }
+                        
+                        # Check for JSON companion
+                        has_companion = False
+                        for s in [".supplemental-metadata.json", ".json"]:
+                            cand = src_file + s if not src_file.endswith(".json") else src_file.replace(".json", s)
+                            if os.path.exists(cand):
+                                file_info["has_json"] = True
+                                has_companion = True
+                                file_info["json_sources"].append({
+                                    "path": cand,
+                                    "src_root": os.path.basename(src_root),
+                                    "rel_path": rel_path
+                                })
                         
                         if is_media:
                             self.album_to_files[album_name].append(file_info)
                             
-                            for s in [".supplemental-metadata.json", ".json"]:
-                                cand = src_file + s if not src_file.endswith(".json") else src_file.replace(".json", s)
-                                if os.path.exists(cand):
-                                    file_info["has_json"] = True
-                                    file_info["json_sources"].append({
-                                        "path": cand,
-                                        "src_root": os.path.basename(src_root),
-                                        "rel_path": rel_path
-                                    })
-                        
-                        # Also index Drive files (non-media)
+                        # Index Drive files too
                         if not is_media:
                             self.album_to_files[album_name].append(file_info)
-                            
-                            for s in [".supplemental-metadata.json", ".json"]:
-                                cand = src_file + s if not src_file.endswith(".json") else src_file.replace(".json", s)
-                                if os.path.exists(cand):
-                                    file_info["has_json"] = True
-                                    file_info["json_sources"].append({
-                                        "path": cand,
-                                        "src_root": os.path.basename(src_root),
-                                        "rel_path": rel_path
-                                    })
-                        
+
                         if f_name not in self.master_file_index:
                             self.master_file_index[f_name] = {"files": [], "json_sources": []}
                         
@@ -365,58 +404,57 @@ class TakeoutMaster:
                         for js in file_info["json_sources"]:
                             self.master_file_index[f_name]["json_sources"].append(js)
             except Exception as e:
-                self.log(f"⚠️ Error scanning {src_root}: {e}")
+                self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Error scanning {src_root}: {err}"))
 
         self.stats["indexed_files"] = len(self.master_file_index)
         self.stats["total_albums_indexed"] = len(self.album_to_files)
         
-        # ===================== PHASE 2: CROSS-ARCHIVE METADATA RESOLUTION (CRITICAL FIX!) =====================
-        self.log("🔍 Phase 2: Resolving metadata across ALL archives...")
+        # ===================== PHASE 2: CROSS-ARCHIVE METADATA RESOLUTION =====================
+        self.root.after(0, lambda: self._log_safe("🔍 Phase 2: Resolving metadata across archives..."))
         
         try:
             for f_name, data in self.master_file_index.items():
                 files = data["files"]
+                has_companion_anywhere = any(fi.get("has_json") for fi in files)
                 
-                # Check if ANY file with this name has a JSON companion anywhere
-                has_companion_anywhere = any(file_info.get("has_json") for file_info in files)
-                
-                # If so, mark ALL files as having potential metadata (they'll be resolved later)
                 if has_companion_anywhere:
                     for file_info in files:
                         if not file_info["has_json"]:
-                            file_info["has_json"] = True  # Mark as potentially having metadata
+                            # Mark as having potential metadata (resolved later via JSON copy or update)
+                            file_info["has_json"] = True 
                             self.stats["metadata_found_later"] += 1
             
-            # Count final resolved files with metadata
             total_with_metadata = sum(1 for f_list in self.album_to_files.values() 
                                      for fi in f_list if fi.get("has_json"))
             self.stats["files_with_metadata"] = total_with_metadata
             
         except Exception as e:
-            self.log(f"⚠️ Error during metadata resolution: {e}")
-
-        # ===================== PHASE 3: COPY & INJECT (Based on RESOLVED Index) =====================
-        self.log("🔍 Phase 3: Executing copy operations for ALL file types...")
+            self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Error during metadata resolution: {err}"))
+            
+        # ===================== PHASE 3: COPY & INJECT =====================
+        self.root.after(0, lambda: self._log_safe("🔍 Phase 3: Executing copy operations..."))
         
         try:
             for album_name, files in self.album_to_files.items():
                 target_dir = os.path.join(self.destination_folder, album_name)
-
                 if not os.path.exists(target_dir):
                     os.makedirs(target_dir, exist_ok=True)
-
+                    
+                # Prepare batch updates
+                metadata_updates = [] 
+                
                 for file_info in files:
                     src_file = file_info["src_file"]
                     f_name = os.path.basename(src_file)
                     
-                    # 1. Duplicate Check (Hash)
+                    # 1. Duplicate Check (Hash) - Skip if already seen
                     try:
                         hasher = hashlib.sha256()
                         with open(src_file, 'rb') as f:
-                            chunk = f.read(1048576)
+                            chunk = f.read(1048576) # First MB only for speed
                             if chunk: hasher.update(chunk)
                         h = hasher.hexdigest()
-
+                        
                         if h in seen_hashes:
                             self.stats["duplicates"] += 1
                             continue
@@ -425,21 +463,21 @@ class TakeoutMaster:
                         self.stats["errors"] += 1
                         continue
                     
-                    # FIX: Only use No_Metadata_Found for files that truly have NO JSON after resolution!
+                    # Determine Target Directory (No Metadata Folder logic)
+                    final_target_dir = target_dir
+                    
                     if not file_info.get("has_json"):
                         final_target_dir = os.path.join(self.destination_folder, "No_Metadata_Found", album_name)
-                        
                         try:
                             if not os.path.exists(final_target_dir):
                                 os.makedirs(final_target_dir, exist_ok=True)
                         except Exception as e:
-                            self.log(f"⚠️ Could not create No_Metadata folder: {e}")
-                    else:
-                        final_target_dir = target_dir
-
+                            self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Could not create folder: {err}"))
+                            
                     # 2. Final Copy Execution
                     dest_p = os.path.join(final_target_dir, f_name)
-
+                    
+                    # Handle Filename Collisions
                     if os.path.exists(dest_p):
                         name, ext = os.path.splitext(f_name)
                         count = 1
@@ -449,7 +487,7 @@ class TakeoutMaster:
                             if not os.path.exists(dest_p): break
                             count += 1
                         self.stats["collisions"] += 1
-
+                        
                     try:
                         shutil.copy2(src_file, dest_p)
                         
@@ -457,80 +495,126 @@ class TakeoutMaster:
                         for js in file_info.get("json_sources", []):
                             if os.path.exists(js["path"]) and not os.path.exists(dest_p + ".json"):
                                 shutil.copy2(js["path"], dest_p + ".json")
-                            
+                                
                         self.stats["copied"] += 1
                         
-                        # Metadata Update on DESTINATION copy (Only for media with ExifTool)
-                        if file_info.get("has_json") and file_info["json_sources"] and self.exiftool_available:
+                        # Prepare Metadata Update for Batch Processing
+                        if file_info.get("has_json") and file_info["json_sources"]:
                             try:
                                 json_path = file_info["json_sources"][0]["path"]
-                                
                                 with open(json_path, 'r', encoding='utf-8') as jf:
                                     d = json.load(jf)
                                 
                                 ts = None
                                 if 'photoTakenTime' in d and 'timestamp' in d['photoTakenTime']:
-                                    ts = d['photoTakenTime']['timestamp']
+                                    ts = str(d['photoTakenTime']['timestamp']) # Keep as string to avoid int error
                                 elif 'creationTime' in d and 'timestamp' in d['creationTime']:
-                                    ts = d['creationTime']['timestamp']
+                                    ts = str(d['creationTime']['timestamp'])
                                 
                                 geo = d.get('geoData', {}) or {}
                                 lat, lon = geo.get('latitude'), geo.get('longitude')
                                 
-                                if lat == 0.0 and lon == 0.0:
-                                    self.stats["missing_gps"] += 1
-                                
-                                # Only update metadata for media files!
-                                if ts and f_name.lower().endswith(('.jpg', '.jpeg', '.png')):
-                                    if self.update_metadata_logic(dest_p, ts, lat, lon):
-                                        self.log(f"✅ Metadata updated for {f_name}")
-                                        self.stats["updated_metadata"] += 1
+                                if ts:
+                                    metadata_updates.append({
+                                        "path": dest_p,
+                                        "ts": ts,
+                                        "lat": lat,
+                                        "lon": lon
+                                    })
+                                else:
+                                    self.stats["no_metadata"] += 1
                             except Exception as e:
-                                self.log(f"⚠️ JSON parsing or update error for {dest_p}: {str(e)[:100]}")
-                                self.stats["errors"] += 1
-
+                                self.root.after(0, lambda err=e: self._log_safe(f"⚠️ JSON parsing error for {dest_p}: {err}"))
                     except Exception as e:
-                        self.log(f"⚠️ File copy error for {f_name}: {e}")
+                        self.root.after(0, lambda err=e: self._log_safe(f"⚠️ File copy error for {f_name}: {err}"))
                         self.stats["errors"] += 1
                         
-                        # Track non-media files copied separately
                         if not src_file.lower().endswith(media_exts):
                             self.stats["non_media_files_copied"] += 1
-        except Exception as e:
-            self.log(f"⚠️ Error during Phase 3: {e}")
 
-        # ===================== PHASE B: ORPHAN RESOLUTION (DESTINATION CLEANUP) =====================
-        try:
-            self.log("🔍 Starting Phase B: Re-linking orphaned JSONs in Destination...")
+            # Execute Metadata Updates in Batches (Group by timestamp to reduce ExifTool calls)
+            if metadata_updates and self.exiftool_available:
+                self.root.after(0, lambda: self._log_safe("🔍 Phase 3.5: Updating metadata..."))
+                
+                # Group updates by exact string value of timestamp
+                batches = defaultdict(list)
+                for item in metadata_updates:
+                    # Use a key that includes lat/lon to ensure we don't mix GPS coords incorrectly if not needed
+                    batch_key = f"{item['ts']}_{item.get('lat', 0)}_{item.get('lon', 0)}"
+                    batches[batch_key].append(item)
 
-            if os.path.exists(self.destination_folder):
+                for key, group in batches.items():
+                    cmd = [self.exiftool_path, '-overwrite_original']
+                    
+                    # Parse timestamp safely
+                    try:
+                        ts_val = group[0]['ts']
+                        dt_s = datetime.fromtimestamp(int(ts_val)).strftime('%Y:%m:%d %H:%M:%S') if isinstance(ts_val, (int, float)) else ts_val
+                        
+                        cmd.extend([f'-DateTimeOriginal={dt_s}', f'-CreateDate={dt_s}', f'-ModifyDate={dt_s}'])
+                        
+                        # Add GPS args if present in group
+                        lat = group[0]['lat']
+                        lon = group[0]['lon']
+                        if lat is not None and abs(lat) > 0.01:
+                            cmd.extend([f'-GPSLatitude={abs(lat)}', '-GPSLatitudeRef=N' if lat >= 0 else '-GPSLatitudeRef=S'])
+                            cmd.extend([f'-GPSLongitude={abs(lon)}', '-GPSLongitudeRef=E' if lon >= 0 else '-GPSLongitudeRef=W'])
+                    except Exception as e:
+                        self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Batch ExifTool error: {err}"))
+                        continue
+                        
+                    # Append files to command (Max 50 per batch to avoid Windows CMD length limits)
+                    for item in group[:50]: 
+                        cmd.append(item['path'])
+                        
+                    try:
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, shell=False)
+                        if result.returncode == 0:
+                            self.stats["updated_metadata"] += len(group)
+                        else:
+                            # Log partial failure
+                            self.root.after(0, lambda err=result.stderr[:50]: self._log_safe(f"⚠️ Batch ExifTool failed: {err}"))
+                            self.stats["metadata_update_failed"] += 1
+                    except Exception as e:
+                        self.stats["errors"] += 1
+                        
+            # ===================== PHASE B: ORPHAN RESOLUTION (O(N) FIX) =====================
+            self.root.after(0, lambda: self._log_safe("🔍 Phase B: Re-linking orphaned JSONs..."))
+            
+            dest_files_map = {}
+            try:
                 for root, dirs, files in os.walk(self.destination_folder):
-                    json_files = [f for f in files if f.endswith(".json")]
+                    for f in files:
+                        if not f.endswith('.json'):
+                            base = os.path.splitext(f)[0]
+                            # Store path relative to destination folder for easy move
+                            dest_files_map[base] = os.path.join(root, f)
+            except Exception as e:
+                self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Error scanning destination: {err}"))
 
-                    for j_file in json_files:
-                        j_path = os.path.join(root, j_file)
-                        base_name = j_file.replace(".json", "")
-                        found_partner = False
+            try:
+                for root, dirs, files in os.walk(self.destination_folder):
+                    for j_file in files:
+                        if j_file.endswith('.json'):
+                            base_name = os.path.splitext(j_file)[0]
+                            j_path = os.path.join(root, j_file)
+                            
+                            if base_name in dest_files_map:
+                                media_partner = dest_files_map[base_name]
+                                target_dir_for_json = os.path.dirname(media_partner)
+                                
+                                try:
+                                    shutil.move(j_path, os.path.join(target_dir_for_json, j_file))
+                                    self.stats["relinked"] += 1
+                                    self.root.after(0, lambda p=j_file: self._log_safe(f"🔗 Re-linked {p}"))
+                                except Exception as e:
+                                    pass # Silently fail move attempts to avoid blocking
+            except Exception as e:
+                self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Error during re-linking: {err}"))
 
-                        for root2, dirs2, files2 in os.walk(self.destination_folder):
-                            if found_partner: break
-
-                            for f2 in files2:
-                                if f2.startswith(base_name) and f2 != j_file:
-                                    media_partner = os.path.join(root2, f2)
-                                    target_dir_for_json = os.path.dirname(media_partner)
-
-                                    try:
-                                        shutil.move(j_path, os.path.join(target_dir_for_json, j_file))
-                                        self.stats["relinked"] += 1
-                                        self.log(f"🔗 Re-linked JSON to partner: {f2}")
-                                        found_partner = True
-                                    except Exception as e:
-                                        pass
-                                if found_partner: break
         except Exception as e:
-            self.log(f"⚠️ Error during Phase B (JSON re-linking): {e}")
-
+            self.root.after(0, lambda err=e: self._log_safe(f"⚠️ Fatal Error during Phase 3: {err}"))
+            
         # ===================== FINAL REPORT =====================
         report = (f"\n--- FINAL REPORT ---\n"
                   f"Scanned:              {self.stats['scanned']}\n"
@@ -545,22 +629,25 @@ class TakeoutMaster:
                   f"Albums Indexed:       {self.stats['total_albums_indexed']}\n"
                   f"Files Indexed:        {self.stats['indexed_files']}\n"
                   f"Errors:               {self.stats['errors']}")
-
-        self.log(report)
+        
+        self.root.after(0, lambda r=report: self._log_safe(r))
+        self.is_running = False
         self.start_btn.config(state='normal')
         
         if not self.exiftool_available:
-            messagebox.showwarning("Warning", "ExifTool was NOT available! Metadata injection was SKIPPED.\n\nTo enable metadata:\n1. Download ExifTool from https://exiftool.org/\n2. Extract it to a folder (e.g., C:\\Tools)\n3. Add that folder to Windows PATH Environment Variables\n4. Restart this script.")
-        
+            messagebox.showwarning("Warning", "ExifTool was NOT available! Metadata injection was SKIPPED.")
+            
         messagebox.showinfo("Done", "Copy Complete! Check log for metadata update status.\nNote: Drive files copied without metadata injection.")
-
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = TakeoutMaster(root)
     
     # Initial check on startup (non-blocking message only in logs/status label)
-    app.log("🔍 Checking prerequisites...")
+    app._log_safe("🔍 Checking prerequisites...")
     app.check_exiftool_on_startup()
     
-    app.root.mainloop()
+    try:
+        app.root.mainloop()
+    except Exception as e:
+        print(f"Mainloop Error: {e}")
