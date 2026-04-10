@@ -171,6 +171,6 @@ Contributions are welcome! Please feel free to submit a Pull Request or open an 
 > ⚠️ **Always back up your data before running bulk file operations, even with safety features enabled.** While this tool operates in Copy Mode by default and includes multiple safeguards, no software can guarantee zero risk during file processing. Use at your own discretion.
 
 
-**Author:** Maxezk  
+**Author:** Max  https://www.linkedin.com/in/max-fuentes-22651686/
 **Version:** 2.0 (Drive Support Added)  
 **Last Updated:** 2026 
